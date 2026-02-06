@@ -122,6 +122,14 @@ func validateSessionTicket(toa *TraefikOidcAuth, encryptedTicket string) (*sessi
 			newTokens, err := toa.renewToken(session.RefreshToken)
 
 			if err != nil {
+				// Check if this is a refresh token invalid/expired error
+				// In that case, we should clear the session and trigger re-authentication
+				// rather than returning an error, since the IDP session is likely still valid
+				errStr := err.Error()
+				if strings.Contains(errStr, "invalid") || strings.Contains(errStr, "expired") {
+					toa.logger.Log(logging.LevelInfo, "Refresh token is invalid or expired. Clearing session to trigger re-authentication.")
+					return nil, nil, nil, nil
+				}
 				return nil, nil, nil, err
 			}
 
