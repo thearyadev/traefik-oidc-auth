@@ -1,3 +1,34 @@
+# !!! FORK !!!
+
+This is a fork of the original repo: https://github.com/sevensolutions/traefik-oidc-auth
+
+This fork was made to resolve a goroutine race condition in the session token renewal. Two requests at the same time during renewal would cause abrupt logouts. The changes applied here look for an error string (TESTED ONLY WITH POCKET ID) and avoid returning an error if the token was invalid. 
+
+Session invalidation should still work (untested). These changes may be insecure, they have not been thoroughly tested. 
+
+Verified to work with Pocket ID + Traefik 3. 
+
+Gotests are passing, future commits will ensure this as well.
+e2e tests have not been run against this fork. 
+
+## installation intructions
+You will need to install this as a local plugin in Traefik. The local plugin guide can be found [here](https://plugins.traefik.io/install). 
+
+1. Create a folder in the binary home of Traefik named "plugins-local"
+2. within this directory create the following tree: `<plugins-local>/github.com/sevensolutions/`
+3. within this directory create the following tree: `<plugins-local>/github.com/sevensolutions/` you can `git clone https://github.com/thearyadev/traefik-oidc-auth.git`. The resulting tree will be `<plugins-local>/github.com/sevensolutions/traefik-oidc-auth` where the folder `traefik-oidc-auth` contains the source from this repo. 
+4. In traefik you can set up this local plugin. The modulename is the path specified above. I use CLI flags. Here is an example: 
+```
+--experimental.localPlugins.traefik-oidc-auth.modulename=github.com/sevensolutions/traefik-oidc-auth
+```
+5. Restart traefik, you should see the plugin in the list of plugins. If there is an error the log will describe it. 
+6. Configure your middleware as normal.
+
+## license of changes
+The changes are licensed under the MIT license, inherited from the original repo.
+
+
+
 # Traefik OpenID Connect Middleware
 
 ![E2E Tests](https://img.shields.io/github/actions/workflow/status/sevensolutions/traefik-oidc-auth/.github%2Fworkflows%2Fe2e-tests.yml?logo=github&label=E2E%20Tests&color=green)
