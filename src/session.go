@@ -78,6 +78,10 @@ func (toa *TraefikOidcAuth) getSessionForRequest(req *http.Request) (*session.Se
 		return nil, false, claims, fmt.Errorf("failed to validate session ticket: %s", err.Error())
 	}
 
+	if session == nil {
+		return nil, false, nil, nil
+	}
+
 	if toa.logger.MinLevel == logging.LevelDebug {
 		tokenExpiresText := ""
 		if session.TokenExpiresIn > 0 {
@@ -109,7 +113,6 @@ func validateSessionTicket(toa *TraefikOidcAuth, encryptedTicket string) (*sessi
 
 	success, claims, err := toa.validateToken(session)
 
-	// Check if the session or IDP token expires soon
 	idpTokenExpiresSoon := false
 	if success {
 		idpTokenExpiresSoon = checkIdpTokenExpiresSoon(toa, session)
@@ -117,17 +120,55 @@ func validateSessionTicket(toa *TraefikOidcAuth, encryptedTicket string) (*sessi
 
 	if !success || err != nil || idpTokenExpiresSoon {
 		if session.RefreshToken != "" {
+			sessionLock := toa.getSessionLock(session.Id)
+			sessionLock.Lock()
+			defer sessionLock.Unlock()
+
+			session, err = toa.SessionStorage.TryGetSession(plainSessionTicket)
+			if err != nil {
+				toa.logger.Log(logging.LevelError, "Reading session after lock failed: %v", err.Error())
+				return nil, nil, nil, err
+			}
+			if session == nil {
+				toa.logger.Log(logging.LevelDebug, "No session found after acquiring lock")
+				return nil, nil, nil, nil
+			}
+
+			success, claims, err = toa.validateToken(session)
+			if success && err == nil {
+				idpTokenExpiresSoon = checkIdpTokenExpiresSoon(toa, session)
+				if !idpTokenExpiresSoon {
+					toa.logger.Log(logging.LevelInfo, "Session was already renewed by another request")
+					return session, claims, nil, nil
+				}
+			}
+
 			toa.logger.Log(logging.LevelInfo, "Trying to renew tokens...")
 
 			newTokens, err := toa.renewToken(session.RefreshToken)
 
 			if err != nil {
-				// Check if this is a refresh token invalid/expired error
-				// In that case, we should clear the session and trigger re-authentication
-				// rather than returning an error, since the IDP session is likely still valid
 				errStr := err.Error()
 				if strings.Contains(errStr, "invalid") || strings.Contains(errStr, "expired") {
-					toa.logger.Log(logging.LevelInfo, "Refresh token is invalid or expired. Clearing session to trigger re-authentication.")
+					toa.logger.Log(logging.LevelInfo, "Refresh token is invalid or expired. Checking if session was renewed by another request...")
+
+					session, err = toa.SessionStorage.TryGetSession(plainSessionTicket)
+					if err != nil {
+						toa.logger.Log(logging.LevelError, "Reading session after failed renewal: %v", err.Error())
+						return nil, nil, nil, err
+					}
+					if session == nil {
+						toa.logger.Log(logging.LevelInfo, "Session cleared. Triggering re-authentication.")
+						return nil, nil, nil, nil
+					}
+
+					success, claims, err = toa.validateToken(session)
+					if success && err == nil {
+						toa.logger.Log(logging.LevelInfo, "Session was renewed by another request, using that session")
+						return session, claims, nil, nil
+					}
+
+					toa.logger.Log(logging.LevelInfo, "Session still invalid. Triggering re-authentication.")
 					return nil, nil, nil, nil
 				}
 				return nil, nil, nil, err
@@ -141,8 +182,6 @@ func validateSessionTicket(toa *TraefikOidcAuth, encryptedTicket string) (*sessi
 				toa.logger.Log(logging.LevelDebug, "The auth provider didn't return a new RefreshToken. Still keeping the old one.")
 			}
 
-			// We had some problems with some providers which didn't return a new IdToken when renewing the tokens.
-			// Thats why i'am logging this case specifically here.
 			if newTokens.IdToken != "" {
 				session.IdToken = newTokens.IdToken
 			} else {
@@ -160,7 +199,6 @@ func validateSessionTicket(toa *TraefikOidcAuth, encryptedTicket string) (*sessi
 				return nil, nil, session, err
 			}
 
-			// Update expirations
 			session.RefreshedAt = time.Now()
 			session.TokenExpiresIn = newTokens.ExpiresIn
 

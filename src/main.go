@@ -38,10 +38,16 @@ type TraefikOidcAuth struct {
 	Jwks                     *oidc.JwksHandler
 	Lock                     sync.RWMutex
 	BypassAuthenticationRule *rules.RequestCondition
+	sessionLocks             sync.Map
 }
 
 // Make sure we fetch oidc discovery document during first request - avoid race condition
 // Perform lock when changing document - we are in concurrent environment
+func (toa *TraefikOidcAuth) getSessionLock(sessionId string) *sync.Mutex {
+	lockI, _ := toa.sessionLocks.LoadOrStore(sessionId, &sync.Mutex{})
+	return lockI.(*sync.Mutex)
+}
+
 func (toa *TraefikOidcAuth) EnsureOidcDiscovery() error {
 	var config = toa.Config
 	var parsedURL = toa.ProviderURL
