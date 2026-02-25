@@ -182,7 +182,11 @@ func (toa *TraefikOidcAuth) ServeHTTP(rw http.ResponseWriter, req *http.Request)
 		toa.next.ServeHTTP(rw, req)
 		return
 	} else {
-		toa.logger.Log(logging.LevelInfo, "Verifying token: %s", err.Error())
+		if err != nil {
+			toa.logger.Log(logging.LevelInfo, "Verifying token: %s", err.Error())
+		} else {
+			toa.logger.Log(logging.LevelInfo, "No valid session. Triggering authentication.")
+		}
 	}
 
 	// Clear the session cookie
