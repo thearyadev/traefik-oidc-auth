@@ -13,6 +13,84 @@ import (
 	"github.com/sevensolutions/traefik-oidc-auth/src/utils"
 )
 
+const recentlyRenewedSessionGracePeriod = 15 * time.Second
+
+func cloneSessionState(sessionState *session.SessionState) *session.SessionState {
+	if sessionState == nil {
+		return nil
+	}
+
+	clonedSession := *sessionState
+	return &clonedSession
+}
+
+func hasNewerSessionState(candidate *session.SessionState, current *session.SessionState) bool {
+	if candidate == nil || current == nil {
+		return false
+	}
+
+	if candidate.RefreshedAt.After(current.RefreshedAt) {
+		return true
+	}
+
+	if candidate.RefreshedAt.Equal(current.RefreshedAt) {
+		return candidate.AccessToken != current.AccessToken || candidate.IdToken != current.IdToken || candidate.RefreshToken != current.RefreshToken
+	}
+
+	return false
+}
+
+func (toa *TraefikOidcAuth) rememberRecentlyRenewedSession(sessionState *session.SessionState) {
+	if sessionState == nil || sessionState.Id == "" {
+		return
+	}
+
+	clonedSession := cloneSessionState(sessionState)
+	toa.recentlyRenewedSessions.Store(sessionState.Id, clonedSession)
+
+	time.AfterFunc(recentlyRenewedSessionGracePeriod, func() {
+		rememberedSessionI, ok := toa.recentlyRenewedSessions.Load(sessionState.Id)
+		if !ok {
+			return
+		}
+
+		rememberedSession := rememberedSessionI.(*session.SessionState)
+		if rememberedSession.RefreshedAt.Equal(clonedSession.RefreshedAt) && rememberedSession.AccessToken == clonedSession.AccessToken && rememberedSession.IdToken == clonedSession.IdToken && rememberedSession.RefreshToken == clonedSession.RefreshToken {
+			toa.recentlyRenewedSessions.Delete(sessionState.Id)
+		}
+	})
+}
+
+func (toa *TraefikOidcAuth) getRecentlyRenewedSession(currentSession *session.SessionState) (*session.SessionState, map[string]interface{}, *session.SessionState, bool) {
+	if currentSession == nil || currentSession.Id == "" {
+		return nil, nil, nil, false
+	}
+
+	rememberedSessionI, ok := toa.recentlyRenewedSessions.Load(currentSession.Id)
+	if !ok {
+		return nil, nil, nil, false
+	}
+
+	rememberedSession := cloneSessionState(rememberedSessionI.(*session.SessionState))
+	if !hasNewerSessionState(rememberedSession, currentSession) {
+		return nil, nil, nil, false
+	}
+
+	success, claims, err := toa.validateToken(rememberedSession)
+	if !success || err != nil {
+		toa.recentlyRenewedSessions.Delete(currentSession.Id)
+		return nil, nil, nil, false
+	}
+
+	if checkIdpTokenExpiresSoon(toa, rememberedSession) {
+		toa.recentlyRenewedSessions.Delete(currentSession.Id)
+		return nil, nil, nil, false
+	}
+
+	toa.logger.Log(logging.LevelInfo, "Using a recently renewed session from another request")
+	return rememberedSession, claims, rememberedSession, true
+}
+
 func (toa *TraefikOidcAuth) getSessionForRequest(req *http.Request) (*session.SessionState, bool, map[string]interface{}, error) {
 	// Use AuthorizationHeader, if present
 	if toa.Config.AuthorizationHeader != nil && toa.Config.AuthorizationHeader.Name != "" {
@@ -111,6 +189,10 @@ func validateSessionTicket(toa *TraefikOidcAuth, encryptedTicket string) (*sessi
 		return nil, nil, nil, nil
 	}
 
+	if rememberedSession, rememberedClaims, updatedSession, ok := toa.getRecentlyRenewedSession(session); ok {
+		return rememberedSession, rememberedClaims, updatedSession, nil
+	}
+
 	success, claims, err := toa.validateToken(session)
 
 	idpTokenExpiresSoon := false
@@ -124,6 +206,10 @@ func validateSessionTicket(toa *TraefikOidcAuth, encryptedTicket string) (*sessi
 			sessionLock.Lock()
 			defer sessionLock.Unlock()
 
+			if rememberedSession, rememberedClaims, updatedSession, ok := toa.getRecentlyRenewedSession(session); ok {
+				return rememberedSession, rememberedClaims, updatedSession, nil
+			}
+
 			session, err = toa.SessionStorage.TryGetSession(plainSessionTicket)
 			if err != nil {
 				toa.logger.Log(logging.LevelError, "Reading session after lock failed: %v", err.Error())
@@ -132,6 +218,10 @@ func validateSessionTicket(toa *TraefikOidcAuth, encryptedTicket string) (*sessi
 			if session == nil {
 				toa.logger.Log(logging.LevelDebug, "No session found after acquiring lock")
 				return nil, nil, nil, nil
+			}
+
+			if rememberedSession, rememberedClaims, updatedSession, ok := toa.getRecentlyRenewedSession(session); ok {
+				return rememberedSession, rememberedClaims, updatedSession, nil
 			}
 
 			success, claims, err = toa.validateToken(session)
@@ -201,6 +291,7 @@ func validateSessionTicket(toa *TraefikOidcAuth, encryptedTicket string) (*sessi
 
 			session.RefreshedAt = time.Now()
 			session.TokenExpiresIn = newTokens.ExpiresIn
+			toa.rememberRecentlyRenewedSession(session)
 
 			toa.logger.Log(logging.LevelInfo, "Successfully renewed session")
 

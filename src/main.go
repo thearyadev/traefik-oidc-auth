@@ -39,6 +39,7 @@ type TraefikOidcAuth struct {
 	Lock                     sync.RWMutex
 	BypassAuthenticationRule *rules.RequestCondition
 	sessionLocks             sync.Map
+	recentlyRenewedSessions  sync.Map
 }
 
 // Make sure we fetch oidc discovery document during first request - avoid race condition
@@ -464,6 +465,7 @@ func (toa *TraefikOidcAuth) handleCallback(rw http.ResponseWriter, req *http.Req
 
 func (toa *TraefikOidcAuth) handleLogout(rw http.ResponseWriter, req *http.Request, session *session.SessionState) {
 	toa.logger.Log(logging.LevelInfo, "Logging out...")
+	toa.recentlyRenewedSessions.Delete(session.Id)
 
 	// https://openid.net/specs/openid-connect-rpinitiated-1_0.html
 
