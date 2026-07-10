@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"testing"
+
+	"github.com/sevensolutions/traefik-oidc-auth/src/oidc"
 )
 
 func TestTemplate_mapToJsonArray(t *testing.T) {
@@ -43,5 +45,31 @@ func TestTemplate_mapToJsonArray(t *testing.T) {
 
 	if result[2] != "prefix:123:suffix" {
 		t.Errorf("Expected prefix:123:suffix at index 2, got %s", result[2])
+	}
+}
+
+func TestStateEncodingRejectsTampering(t *testing.T) {
+	cfg := CreateConfig()
+	toa := &TraefikOidcAuth{Config: cfg}
+
+	encoded, err := toa.encodeState(&oidc.OidcState{
+		Action:      "Login",
+		RedirectUrl: "https://example.com/app",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	decoded, err := toa.decodeState(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Action != "Login" || decoded.RedirectUrl != "https://example.com/app" {
+		t.Fatalf("unexpected decoded state: %+v", decoded)
+	}
+
+	tampered := encoded[:len(encoded)-1] + "A"
+	if _, err := toa.decodeState(tampered); err == nil {
+		t.Fatal("expected tampered state to be rejected")
 	}
 }

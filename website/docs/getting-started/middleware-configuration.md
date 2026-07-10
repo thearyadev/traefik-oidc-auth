@@ -22,6 +22,16 @@ If a variable is not defined, the provided value is used as-is.
 Please note that you can only use a single environment variable using this syntax and it **does not allow templating**.
 So something like this wouldn't work: `https://auth.${MY_DOMAIN}/auth/${CLIENT_ID}`.  
 But: If you're using YAML-files for configuration you can use [traefik's templating](https://doc.traefik.io/traefik/providers/file/#go-templating).
+
+Alternatively, you can read the value from a file using `${file:/path/to/file}`. This is useful for secrets
+(eg. `ClientSecret` or `Secret`) when using Docker/Kubernetes secrets mounted as files, since environment
+variables set on a container can be read by anyone with access to `docker inspect`, while a mounted secret
+file cannot. The file content is trimmed of surrounding whitespace/newlines. Eg.:
+```yml
+Secret: "${file:/run/secrets/oidc_secret}"
+Provider:
+  ClientSecret: "${file:/run/secrets/oidc_client_secret}"
+```
 :::
 
 | Name | Required | Type | Default | Description |
@@ -41,7 +51,7 @@ But: If you're using YAML-files for configuration you can use [traefik's templat
 | `SessionCookie` | no | [`SessionCookie`](#session-cookie) | *none* | SessionCookie Configuration. See *SessionCookieConfig* block. |
 | `AuthorizationHeader` | no | [`AuthorizationHeader`](#authorization-header) | *none* | AuthorizationHeader Configuration. See *AuthorizationHeader* block. |
 | `AuthorizationCookie` | no | [`AuthorizationCookie`](#authorization-cookie) | *none* | AuthorizationCookie Configuration. See *AuthorizationCookie* block. |
-| `UnauthorizedBehavior`* | no | `string` | `Auto` | Defines the behavior for unauthenticated requests. `Challenge` means the user will be redirected to the IDP's login page, `Unauthorized` will return a 401 status response, and `Auto` will automatically choose based on request type (HTML requests get redirected, AJAX requests get 401). |
+| `UnauthorizedBehavior`* | no | `string` | `Auto` | Defines the behavior for unauthenticated requests. `Challenge` means the user will be redirected to the IDP's login page, `Unauthorized` will return a 401 status response, `Forward` will send the request as unauthenticated to the upstream service, and `Auto` will automatically choose based on request type (HTML requests get redirected, AJAX requests get 401). |
 | `Authorization` | no | [`Authorization`](#authorization) | *none* | Authorization Configuration. See *Authorization* block. |
 | `Headers` | no | [`Header`](#header) | *none* | Supplies a list of headers which will be attached to the upstream request. See *Header* block. |
 | `BypassAuthenticationRule`* | no | `string` | *none* | Specifies an optional rule to bypass authentication. See [Bypass Authentication Rule](./bypass-authentication-rule.md) for more details. |
@@ -139,11 +149,12 @@ So instead of `Name: "my:zitadel:grants"`, use `Name: "['my:zitadel:grants']"`.
 
 ## Header Block {#header}
 
-| Name     | Required           | Type     | Default | Description                                                                                                                               |
-|----------|--------------------|----------|---------|-------------------------------------------------------------------------------------------------------------------------------------------|
-| `Name`   | yes                | `string` | *none*  | The name of the header which should be added to the upstream request.                                                                     |
-| `Value`  | if `Values` absent | `string` | *none*  | The value of the header, which can use [Go-Templates](https://pkg.go.dev/text/template). Please see the info below.                       |
-| `Values` | if `Value` absent  | `string` | *none*  | The values of the header, which can use [Go-Templates](https://pkg.go.dev/text/template). Should evaluate to valid json array of strings. |
+| Name          | Required           | Type     | Default    | Description                                                                                                                                                      |
+|---------------|--------------------|----------|------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `Name`        | yes                | `string` | *none*     | The name of the header which should be added to the upstream request.                                                                                            |
+| `Value`       | if `Values` absent | `string` | *none*     | The value of the header, which can use [Go-Templates](https://pkg.go.dev/text/template). Please see the info below.                                              |
+| `Values`      | if `Value` absent  | `string` | *none*     | The values of the header, which can use [Go-Templates](https://pkg.go.dev/text/template). Should evaluate to valid json array of strings.                        |
+| `IncludeWhen` | no                 | `string` | Authorized | Whether the header is sent to public routes or if `UnauthorizedBehavior` is set to `Forward`. Available options are `Always`, `Authorized`, `Public`, `Forward`. |
 
 By using Go-Templates you have access to the following attributes:
 

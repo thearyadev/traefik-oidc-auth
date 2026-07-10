@@ -2,8 +2,44 @@ package utils
 
 import (
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 )
+
+func TestExpandEnvironmentVariableStringFromEnv(t *testing.T) {
+	t.Setenv("TEST_EXPAND_ENV_VAR", "value-from-env")
+
+	result := ExpandEnvironmentVariableString("${TEST_EXPAND_ENV_VAR}")
+
+	if result != "value-from-env" {
+		t.Fatalf("expected value-from-env, got %s", result)
+	}
+}
+
+func TestExpandEnvironmentVariableStringFromFile(t *testing.T) {
+	secretFile := filepath.Join(t.TempDir(), "secret")
+
+	if err := os.WriteFile(secretFile, []byte("value-from-file\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	result := ExpandEnvironmentVariableString("${file:" + secretFile + "}")
+
+	if result != "value-from-file" {
+		t.Fatalf("expected value-from-file, got %s", result)
+	}
+}
+
+func TestExpandEnvironmentVariableStringFromMissingFile(t *testing.T) {
+	value := "${file:/no/such/file}"
+
+	result := ExpandEnvironmentVariableString(value)
+
+	if result != value {
+		t.Fatalf("expected the original value to be returned unchanged, got %s", result)
+	}
+}
 
 func TestChunkString(t *testing.T) {
 	originalText := "abcdefghijklmnopqrstuvwxyz"
@@ -50,6 +86,16 @@ func TestDecryptEmptyString(t *testing.T) {
 	_, err := Decrypt("", secret)
 
 	// Must return an error
+	if err == nil {
+		t.Fail()
+	}
+}
+
+func TestDecryptShortCiphertext(t *testing.T) {
+	secret := "MLFs4TT99kOOq8h3UAVRtYoCTDYXiRcZ"
+
+	_, err := Decrypt("abc", secret)
+
 	if err == nil {
 		t.Fail()
 	}

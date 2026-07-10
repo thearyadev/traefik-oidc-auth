@@ -8,18 +8,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sevensolutions/traefik-oidc-auth/src/config"
 	"github.com/sevensolutions/traefik-oidc-auth/src/logging"
 	"github.com/sevensolutions/traefik-oidc-auth/src/oidc"
 	"github.com/sevensolutions/traefik-oidc-auth/src/session"
-	"github.com/sevensolutions/traefik-oidc-auth/src/utils"
 )
 
 func TestSessionIdpTokenExpiration(t *testing.T) {
-	config := &Config{
-		Provider: &ProviderConfig{
+	config := &config.Config{
+		Provider: &config.ProviderConfig{
 			TokenRenewalThreshold: 0.5,
 		},
-		SessionCookie: &SessionCookieConfig{
+		SessionCookie: &config.SessionCookieConfig{
 			MaxAge: 0,
 		},
 	}
@@ -100,12 +100,12 @@ func TestPerSessionLocksAreIndependent(t *testing.T) {
 }
 
 func TestValidateSessionTicketUsesRecentlyRenewedSession(t *testing.T) {
-	config := CreateConfig()
-	config.Secret = DefaultSecret
-	config.Provider.ClientId = "test-client"
-	config.Provider.ClientSecret = "test-secret"
-	config.Provider.TokenValidation = "Introspection"
-	config.Provider.TokenRenewalThreshold = 0.5
+	cfg := CreateConfig()
+	cfg.Secret = config.DefaultSecret
+	cfg.Provider.ClientId = "test-client"
+	cfg.Provider.ClientSecret = "test-secret"
+	cfg.Provider.TokenValidation = "Introspection"
+	cfg.Provider.TokenRenewalThreshold = 0.5
 
 	logger := logging.CreateLogger(logging.LevelDebug)
 
@@ -183,7 +183,7 @@ func TestValidateSessionTicketUsesRecentlyRenewedSession(t *testing.T) {
 	toa := &TraefikOidcAuth{
 		logger:         logger,
 		httpClient:     server.Client(),
-		Config:         config,
+		Config:         cfg,
 		SessionStorage: session.CreateCookieSessionStorage(),
 		DiscoveryDocument: &oidc.OidcDiscovery{
 			TokenEndpoint:         server.URL + "/token",
@@ -200,14 +200,9 @@ func TestValidateSessionTicketUsesRecentlyRenewedSession(t *testing.T) {
 		TokenExpiresIn: 100,
 	}
 
-	sessionTicket, err := toa.SessionStorage.StoreSession(staleSession.Id, staleSession)
+	sessionTicket, err := toa.SessionStorage.StoreSession(toa.logger, toa.Config, staleSession.Id, staleSession)
 	if err != nil {
 		t.Fatalf("failed to store session: %v", err)
-	}
-
-	encryptedTicket, err := utils.Encrypt(sessionTicket, config.Secret)
-	if err != nil {
-		t.Fatalf("failed to encrypt session: %v", err)
 	}
 
 	type validationResult struct {
@@ -221,14 +216,14 @@ func TestValidateSessionTicketUsesRecentlyRenewedSession(t *testing.T) {
 	secondResultCh := make(chan validationResult, 1)
 
 	go func() {
-		sessionState, claims, updatedSession, err := validateSessionTicket(toa, encryptedTicket)
+		sessionState, claims, updatedSession, err := validateSessionTicket(toa, sessionTicket)
 		firstResultCh <- validationResult{session: sessionState, claims: claims, updatedSession: updatedSession, err: err}
 	}()
 
 	<-firstRefreshStarted
 
 	go func() {
-		sessionState, claims, updatedSession, err := validateSessionTicket(toa, encryptedTicket)
+		sessionState, claims, updatedSession, err := validateSessionTicket(toa, sessionTicket)
 		secondResultCh <- validationResult{session: sessionState, claims: claims, updatedSession: updatedSession, err: err}
 	}()
 

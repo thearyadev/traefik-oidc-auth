@@ -16,6 +16,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/sevensolutions/traefik-oidc-auth/src/config"
 	"github.com/sevensolutions/traefik-oidc-auth/src/errorPages"
 	"github.com/sevensolutions/traefik-oidc-auth/src/rules"
 
@@ -32,7 +33,7 @@ type TraefikOidcAuth struct {
 	ProviderURL              *url.URL
 	ClientJwtPrivateKey      *rsa.PrivateKey
 	CallbackURL              *url.URL
-	Config                   *Config
+	Config                   *config.Config
 	SessionStorage           session.SessionStorage
 	DiscoveryDocument        *oidc.OidcDiscovery
 	Jwks                     *oidc.JwksHandler
@@ -113,15 +114,30 @@ func (toa *TraefikOidcAuth) isCallbackRequest(req *http.Request) bool {
 	return true
 }
 
+func (toa *TraefikOidcAuth) encodeState(state *oidc.OidcState) (string, error) {
+	plainState, err := oidc.EncodeState(state)
+	if err != nil {
+		return "", err
+	}
+
+	return utils.Encrypt(plainState, toa.Config.Secret)
+}
+
+func (toa *TraefikOidcAuth) decodeState(encryptedState string) (*oidc.OidcState, error) {
+	plainState, err := utils.Decrypt(encryptedState, toa.Config.Secret)
+	if err != nil {
+		return nil, err
+	}
+
+	return oidc.DecodeState(plainState)
+}
+
 func (toa *TraefikOidcAuth) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	isPublic := false
 	if toa.BypassAuthenticationRule != nil {
 		if toa.BypassAuthenticationRule.Match(toa.logger, req) {
 			toa.logger.Log(logging.LevelDebug, "BypassAuthenticationRule matched. Forwarding request without authentication.")
-
-			// Forward the request
-			toa.sanitizeForUpstream(req)
-			toa.next.ServeHTTP(rw, req)
-			return
+			isPublic = true
 		} else {
 			toa.logger.Log(logging.LevelDebug, "BypassAuthenticationRule not matched. Requiring authentication.")
 		}
@@ -141,7 +157,7 @@ func (toa *TraefikOidcAuth) ServeHTTP(rw http.ResponseWriter, req *http.Request)
 	}
 
 	if toa.Config.LoginUri != "" && strings.HasPrefix(req.RequestURI, toa.Config.LoginUri) {
-		toa.redirectToProvider(rw, req)
+		toa.handleLogin(rw, req)
 		return
 	}
 
@@ -161,13 +177,13 @@ func (toa *TraefikOidcAuth) ServeHTTP(rw http.ResponseWriter, req *http.Request)
 			session.IsAuthorized = isAuthorized(toa.logger, toa.Config.Authorization, claims)
 		}
 
-		if !session.IsAuthorized {
+		if !session.IsAuthorized && toa.Config.UnauthorizedBehavior != "Forward" {
 			toa.handleUnauthorized(rw, req)
 			return
 		}
 
 		// Attach upstream headers
-		err = toa.attachHeaders(req, session, claims)
+		err = toa.attachHeaders(req, session, claims, isPublic, session.IsAuthorized)
 		if err != nil {
 			toa.logger.Log(logging.LevelError, "Error while attaching headers: %s", err.Error())
 			http.Error(rw, err.Error(), http.StatusInternalServerError)
@@ -182,16 +198,20 @@ func (toa *TraefikOidcAuth) ServeHTTP(rw http.ResponseWriter, req *http.Request)
 		toa.sanitizeForUpstream(req)
 		toa.next.ServeHTTP(rw, req)
 		return
+	} else if isPublic {
+		toa.sanitizeForUpstream(req)
+		toa.next.ServeHTTP(rw, req)
+		return
 	} else {
 		if err != nil {
 			toa.logger.Log(logging.LevelInfo, "Verifying token: %s", err.Error())
 		} else {
 			toa.logger.Log(logging.LevelInfo, "No valid session. Triggering authentication.")
 		}
-	}
 
-	// Clear the session cookie
-	clearChunkedCookie(toa.Config, rw, req, getSessionCookieName(toa.Config))
+		// Clear the session cookie
+		clearChunkedCookie(toa.Config, rw, req, getSessionCookieName(toa.Config))
+	}
 
 	toa.handleUnauthenticated(rw, req)
 }
@@ -257,7 +277,7 @@ func newTemplate() *template.Template {
 	})
 }
 
-func (toa *TraefikOidcAuth) attachHeaders(req *http.Request, session *session.SessionState, claims map[string]interface{}) error {
+func (toa *TraefikOidcAuth) attachHeaders(req *http.Request, session *session.SessionState, claims map[string]interface{}, isPublicRoute bool, isAuthorized bool) error {
 	if toa.Config.Headers != nil {
 		evalContext := make(map[string]interface{})
 
@@ -267,19 +287,27 @@ func (toa *TraefikOidcAuth) attachHeaders(req *http.Request, session *session.Se
 		evalContext["refreshToken"] = session.RefreshToken
 
 		for _, header := range toa.Config.Headers {
+			if isPublicRoute && header.IncludeWhen != "Always" && header.IncludeWhen != "Public" {
+				continue
+			}
+
+			if !isAuthorized && header.IncludeWhen != "Always" && header.IncludeWhen != "Forward" {
+				continue
+			}
+
 			if header.Value != "" {
-				if header.template == nil {
+				if header.Template == nil {
 					tpl, err := newTemplate().Parse(header.Value)
 
 					if err != nil {
 						return err
 					}
 
-					header.template = tpl
+					header.Template = tpl
 				}
 
 				var renderedValue bytes.Buffer
-				err := header.template.Execute(&renderedValue, evalContext)
+				err := header.Template.Execute(&renderedValue, evalContext)
 
 				if err == nil {
 					req.Header.Set(header.Name, renderedValue.String())
@@ -287,18 +315,18 @@ func (toa *TraefikOidcAuth) attachHeaders(req *http.Request, session *session.Se
 					req.Header.Set(header.Name, err.Error())
 				}
 			} else if header.Values != "" {
-				if header.template == nil {
+				if header.Template == nil {
 					tpl, err := newTemplate().Parse(header.Values)
 
 					if err != nil {
 						return err
 					}
 
-					header.template = tpl
+					header.Template = tpl
 				}
 
 				var renderedValue bytes.Buffer
-				err := header.template.Execute(&renderedValue, evalContext)
+				err := header.Template.Execute(&renderedValue, evalContext)
 
 				if err != nil {
 					req.Header.Set(header.Name, err.Error())
@@ -338,7 +366,7 @@ func (toa *TraefikOidcAuth) handleCallback(rw http.ResponseWriter, req *http.Req
 		return
 	}
 
-	state, err := oidc.DecodeState(base64State)
+	state, err := toa.decodeState(base64State)
 	if err != nil {
 		toa.logger.Log(logging.LevelWarn, "State on callback request is invalid.")
 		http.Error(rw, "State is invalid", http.StatusInternalServerError)
@@ -456,6 +484,9 @@ func (toa *TraefikOidcAuth) handleCallback(rw http.ResponseWriter, req *http.Req
 
 		// Clear the cookie
 		clearChunkedCookie(toa.Config, rw, req, getSessionCookieName(toa.Config))
+	} else if state.Action == "RedirectThenLogin" {
+		toa.redirectToProvider(rw, req, redirectUrl)
+		return
 	}
 
 	toa.logger.Log(logging.LevelInfo, "Redirecting to %s", redirectUrl)
@@ -502,7 +533,7 @@ func (toa *TraefikOidcAuth) handleLogout(rw http.ResponseWriter, req *http.Reque
 		RedirectUrl: redirectUri,
 	}
 
-	base64State, err := oidc.EncodeState(state)
+	base64State, err := toa.encodeState(state)
 	if err != nil {
 		toa.logger.Log(logging.LevelError, "Failed to serialize state: %s", err.Error())
 		http.Error(rw, err.Error(), http.StatusInternalServerError)
@@ -522,15 +553,19 @@ func (toa *TraefikOidcAuth) handleLogout(rw http.ResponseWriter, req *http.Reque
 func (toa *TraefikOidcAuth) handleUnauthenticated(rw http.ResponseWriter, req *http.Request) {
 	switch toa.Config.UnauthorizedBehavior {
 	case "Challenge":
-		// Redirect to Identity Provider
-		toa.redirectToProvider(rw, req)
+		// Handle login
+		toa.handleLogin(rw, req)
 	case "Unauthorized":
 		// Respond with 401 Unauthorized
 		toa.writeUnauthenticatedError(rw, req)
+	case "Forward":
+		// Forward request
+		toa.sanitizeForUpstream(req)
+		toa.next.ServeHTTP(rw, req)
 	case "Auto":
 		if utils.IsHtmlRequest(req) {
-			// Redirect to Identity Provider for HTML requests
-			toa.redirectToProvider(rw, req)
+			// Handle login for HTML requests
+			toa.handleLogin(rw, req)
 		} else {
 			// Respond with 401 Unauthorized for non-HTML requests
 			toa.writeUnauthenticatedError(rw, req)
@@ -580,8 +615,8 @@ func (toa *TraefikOidcAuth) writeUnauthorizedError(rw http.ResponseWriter, req *
 	errorPages.WriteError(toa.logger, toa.Config.ErrorPages.Unauthorized, rw, req, data)
 }
 
-func (toa *TraefikOidcAuth) redirectToProvider(rw http.ResponseWriter, req *http.Request) {
-	toa.logger.Log(logging.LevelInfo, "Redirecting to OIDC provider...")
+func (toa *TraefikOidcAuth) handleLogin(rw http.ResponseWriter, req *http.Request) {
+	toa.logger.Log(logging.LevelInfo, "Logging in...")
 	var redirectUrl string
 
 	// If the user specified one on the /login request, use this one
@@ -606,6 +641,28 @@ func (toa *TraefikOidcAuth) redirectToProvider(rw http.ResponseWriter, req *http
 		}
 	}
 
+	if toa.needsDoubleRedirect(req) {
+		toa.doubleRedirectToProvider(rw, req, redirectUrl)
+	} else {
+		toa.redirectToProvider(rw, req, redirectUrl)
+	}
+}
+
+func (toa *TraefikOidcAuth) needsDoubleRedirect(req *http.Request) bool {
+	if toa.Config.Provider.UsePkceBool {
+		host := utils.GetFullHost(req)
+		callbackUrl := toa.GetAbsoluteCallbackURL(req).String()
+		if !strings.HasPrefix(callbackUrl, host) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (toa *TraefikOidcAuth) redirectToProvider(rw http.ResponseWriter, req *http.Request, redirectUrl string) {
+	toa.logger.Log(logging.LevelInfo, "Redirecting to OIDC provider...")
+
 	callbackUrl := toa.GetAbsoluteCallbackURL(req).String()
 
 	state := oidc.OidcState{
@@ -613,7 +670,7 @@ func (toa *TraefikOidcAuth) redirectToProvider(rw http.ResponseWriter, req *http
 		RedirectUrl: redirectUrl,
 	}
 
-	stateBase64, err := oidc.EncodeState(&state)
+	stateBase64, err := toa.encodeState(&state)
 	if err != nil {
 		toa.logger.Log(logging.LevelError, "Failed to serialize state: %s", err.Error())
 		http.Error(rw, err.Error(), http.StatusInternalServerError)
@@ -681,4 +738,34 @@ func (toa *TraefikOidcAuth) redirectToProvider(rw http.ResponseWriter, req *http
 	authorizationEndpointUrl.RawQuery = urlValues.Encode()
 
 	http.Redirect(rw, req, authorizationEndpointUrl.String(), http.StatusFound)
+}
+
+func (toa *TraefikOidcAuth) doubleRedirectToProvider(rw http.ResponseWriter, req *http.Request, redirectUrl string) {
+	toa.logger.Log(logging.LevelInfo, "Redirecting to OIDC provider via callback URL...")
+
+	callbackUrl := toa.GetAbsoluteCallbackURL(req)
+
+	state := oidc.OidcState{
+		Action:      "RedirectThenLogin",
+		RedirectUrl: redirectUrl,
+	}
+
+	stateBase64, err := toa.encodeState(&state)
+	if err != nil {
+		toa.logger.Log(logging.LevelError, "Failed to serialize state: %s", err.Error())
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	urlValues := url.Values{
+		"state": {stateBase64},
+	}
+
+	if prompt := req.URL.Query().Get("prompt"); prompt != "" {
+		urlValues.Add("prompt", prompt)
+	}
+
+	callbackUrl.RawQuery = urlValues.Encode()
+
+	http.Redirect(rw, req, callbackUrl.String(), http.StatusFound)
 }

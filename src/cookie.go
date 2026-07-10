@@ -6,30 +6,42 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/sevensolutions/traefik-oidc-auth/src/config"
 	"github.com/sevensolutions/traefik-oidc-auth/src/utils"
 )
 
-func setChunkedCookies(config *Config, rw http.ResponseWriter, cookieName string, cookieValue string) {
+func setChunkedCookies(config *config.Config, rw http.ResponseWriter, cookieName string, cookieValue string) {
 	cookieChunks := utils.ChunkString(cookieValue, 3072)
 
-	baseCookie := createSessionCookie(config)
+	baseCookie := *createSessionCookie(config)
 	baseCookie.Name = cookieName
 
 	// Set the cookie
 	if len(cookieChunks) == 1 {
 		c := baseCookie
 		c.Value = cookieValue
-		http.SetCookie(rw, c)
+		http.SetCookie(rw, &c)
+
+		c = baseCookie
+		c.Name = cookieName + ".Chunks"
+		c.Value = ""
+		makeCookieExpireImmediately(&c)
+		http.SetCookie(rw, &c)
 	} else {
 		c := baseCookie
+		c.Value = ""
+		makeCookieExpireImmediately(&c)
+		http.SetCookie(rw, &c)
+
+		c = baseCookie
 		c.Name = cookieName + ".Chunks"
 		c.Value = fmt.Sprintf("%d", len(cookieChunks))
-		http.SetCookie(rw, c)
+		http.SetCookie(rw, &c)
 
 		for index, chunk := range cookieChunks {
 			c.Name = fmt.Sprintf("%s.%d", cookieName, index+1)
 			c.Value = chunk
-			http.SetCookie(rw, c)
+			http.SetCookie(rw, &c)
 		}
 	}
 }
@@ -90,7 +102,7 @@ func getChunkedCookieNames(req *http.Request, cookieName string) (map[string]str
 	}
 	return cookieNames, nil
 }
-func clearChunkedCookie(config *Config, rw http.ResponseWriter, req *http.Request, cookieName string) error {
+func clearChunkedCookie(config *config.Config, rw http.ResponseWriter, req *http.Request, cookieName string) error {
 	chunkCount, err := getChunkedCookieCount(req, cookieName)
 	if err != nil {
 		return err
@@ -136,12 +148,12 @@ func makeCookieExpireImmediately(cookie *http.Cookie) *http.Cookie {
 	return cookie
 }
 
-func getCodeVerifierCookieName(config *Config) string {
+func getCodeVerifierCookieName(config *config.Config) string {
 	return makeCookieName(config, "CodeVerifier")
 }
-func getSessionCookieName(config *Config) string {
+func getSessionCookieName(config *config.Config) string {
 	return makeCookieName(config, "Session")
 }
-func makeCookieName(config *Config, name string) string {
+func makeCookieName(config *config.Config, name string) string {
 	return fmt.Sprintf("%s.%s", config.CookieNamePrefix, name)
 }

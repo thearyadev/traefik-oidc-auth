@@ -24,6 +24,8 @@ type AcceptType struct {
 }
 
 // Expands the environment variable if it is enclosed in ${}. If the variable is not present, the original value is returned.
+// Also supports reading the value from a file via ${file:/path/to/file}, eg. to consume a Docker/Kubernetes
+// secret mounted as a file, since environment variables can be read by anyone with access to `docker inspect`.
 func ExpandEnvironmentVariableString(value string) string {
 	after, hasPrefix := strings.CutPrefix(value, "${")
 
@@ -31,10 +33,18 @@ func ExpandEnvironmentVariableString(value string) string {
 		variableName, hasSuffix := strings.CutSuffix(after, "}")
 
 		if hasSuffix {
-			variableValue, isDefined := os.LookupEnv(variableName)
+			if filePath, isFile := strings.CutPrefix(variableName, "file:"); isFile {
+				fileContent, err := os.ReadFile(filePath)
 
-			if isDefined {
-				return variableValue
+				if err == nil {
+					return strings.TrimSpace(string(fileContent))
+				}
+			} else {
+				variableValue, isDefined := os.LookupEnv(variableName)
+
+				if isDefined {
+					return variableValue
+				}
 			}
 		}
 	}
@@ -208,6 +218,9 @@ func Decrypt(ciphertext string, secret string) (string, error) {
 	// Since we know the ciphertext is actually nonce+ciphertext
 	// And len(nonce) == NonceSize(). We can separate the two.
 	nonceSize := gcm.NonceSize()
+	if len(ciphertext) < nonceSize {
+		return "", errors.New("ciphertext is too short")
+	}
 	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
 
 	plaintext, err := gcm.Open(nil, []byte(nonce), []byte(ciphertext), nil)

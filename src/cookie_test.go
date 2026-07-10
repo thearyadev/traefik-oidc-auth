@@ -4,13 +4,16 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
+	"strings"
 	"testing"
+
+	"github.com/sevensolutions/traefik-oidc-auth/src/config"
 )
 
 func TestSetChunkedCookiesNonChunked(t *testing.T) {
-	config := &Config{
+	config := &config.Config{
 		CookieNamePrefix: "TraefikOidcAuth",
-		SessionCookie: &SessionCookieConfig{
+		SessionCookie: &config.SessionCookieConfig{
 			Path:     "/",
 			Domain:   "",
 			Secure:   true,
@@ -24,17 +27,24 @@ func TestSetChunkedCookiesNonChunked(t *testing.T) {
 
 	setChunkedCookies(config, rw, "TraefikOidcAuth.Session", "some-short-value")
 
-	setCookieHeader := rw.HeaderMap.Get("Set-Cookie")
+	setCookieHeader := rw.HeaderMap.Values("Set-Cookie")
 
-	if setCookieHeader != "TraefikOidcAuth.Session=some-short-value; Path=/; HttpOnly; Secure" {
-		t.Fail()
+	if len(setCookieHeader) != 2 {
+		t.Fatalf("expected 2 Set-Cookie headers, got %d", len(setCookieHeader))
+	}
+	if setCookieHeader[0] != "TraefikOidcAuth.Session=some-short-value; Path=/; HttpOnly; Secure" {
+		t.Fatalf("unexpected session cookie: %s", setCookieHeader[0])
+	}
+	if !strings.HasPrefix(setCookieHeader[1], "TraefikOidcAuth.Session.Chunks=; Path=/; Expires=") ||
+		!strings.Contains(setCookieHeader[1], "Max-Age=0; HttpOnly; Secure") {
+		t.Fatalf("unexpected chunks clearing cookie: %s", setCookieHeader[1])
 	}
 }
 
 func TestSetChunkedCookiesChunked(t *testing.T) {
-	config := &Config{
+	config := &config.Config{
 		CookieNamePrefix: "TraefikOidcAuth",
-		SessionCookie: &SessionCookieConfig{
+		SessionCookie: &config.SessionCookieConfig{
 			Path:     "/",
 			Domain:   "",
 			Secure:   true,
@@ -52,18 +62,22 @@ func TestSetChunkedCookiesChunked(t *testing.T) {
 
 	setCookieHeader := rw.HeaderMap.Values("Set-Cookie")
 
-	if len(setCookieHeader) != 3 {
-		t.Fail()
+	if len(setCookieHeader) != 4 {
+		t.Fatalf("expected 4 Set-Cookie headers, got %d", len(setCookieHeader))
 	}
 
-	if setCookieHeader[0] != "TraefikOidcAuth.Session.Chunks=2; Path=/; HttpOnly; Secure" {
-		t.Fail()
+	if !strings.HasPrefix(setCookieHeader[0], "TraefikOidcAuth.Session=; Path=/; Expires=") ||
+		!strings.Contains(setCookieHeader[0], "Max-Age=0; HttpOnly; Secure") {
+		t.Fatalf("unexpected base clearing cookie: %s", setCookieHeader[0])
 	}
-	if setCookieHeader[1] != fmt.Sprintf("TraefikOidcAuth.Session.1=%s; Path=/; HttpOnly; Secure", longValue[:3072]) {
-		t.Fail()
+	if setCookieHeader[1] != "TraefikOidcAuth.Session.Chunks=2; Path=/; HttpOnly; Secure" {
+		t.Fatalf("unexpected chunks cookie: %s", setCookieHeader[1])
 	}
-	if setCookieHeader[2] != fmt.Sprintf("TraefikOidcAuth.Session.2=%s; Path=/; HttpOnly; Secure", longValue[3072:]) {
-		t.Fail()
+	if setCookieHeader[2] != fmt.Sprintf("TraefikOidcAuth.Session.1=%s; Path=/; HttpOnly; Secure", longValue[:3072]) {
+		t.Fatalf("unexpected first chunk cookie")
+	}
+	if setCookieHeader[3] != fmt.Sprintf("TraefikOidcAuth.Session.2=%s; Path=/; HttpOnly; Secure", longValue[3072:]) {
+		t.Fatalf("unexpected second chunk cookie")
 	}
 }
 
