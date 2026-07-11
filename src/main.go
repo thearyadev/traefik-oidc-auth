@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -209,11 +210,16 @@ func (toa *TraefikOidcAuth) ServeHTTP(rw http.ResponseWriter, req *http.Request)
 			toa.logger.Log(logging.LevelInfo, "No valid session. Triggering authentication.")
 		}
 
-		// Clear the session cookie
-		clearChunkedCookie(toa.Config, rw, req, getSessionCookieName(toa.Config))
+		if shouldClearSessionCookie(err) {
+			clearChunkedCookie(toa.Config, rw, req, getSessionCookieName(toa.Config))
+		}
 	}
 
 	toa.handleUnauthenticated(rw, req)
+}
+
+func shouldClearSessionCookie(err error) bool {
+	return !errors.Is(err, errPreserveSessionCookie)
 }
 
 func (toa *TraefikOidcAuth) sanitizeForUpstream(req *http.Request) {

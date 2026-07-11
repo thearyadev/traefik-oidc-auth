@@ -15,6 +15,8 @@ import (
 
 const recentlyRenewedSessionGracePeriod = 15 * time.Second
 
+var errPreserveSessionCookie = errors.New("preserve session cookie")
+
 func cloneSessionState(sessionState *session.SessionState) *session.SessionState {
 	if sessionState == nil {
 		return nil
@@ -153,7 +155,7 @@ func (toa *TraefikOidcAuth) getSessionForRequest(req *http.Request) (*session.Se
 	session, claims, updatedSession, err := validateSessionTicket(toa, sessionTicket)
 
 	if err != nil {
-		return nil, false, claims, fmt.Errorf("failed to validate session ticket: %s", err.Error())
+		return nil, false, claims, fmt.Errorf("failed to validate session ticket: %w", err)
 	}
 
 	if session == nil {
@@ -253,7 +255,7 @@ func validateSessionTicket(toa *TraefikOidcAuth, sessionTicket string) (*session
 					}
 
 					toa.logger.Log(logging.LevelInfo, "Session still invalid. Triggering re-authentication.")
-					return nil, nil, nil, nil
+					return nil, nil, nil, fmt.Errorf("%w: refresh token is invalid or expired and current token is invalid", errPreserveSessionCookie)
 				}
 				return nil, nil, nil, err
 			}

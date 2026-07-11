@@ -2,6 +2,7 @@ package src
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -258,5 +259,154 @@ func TestValidateSessionTicketUsesRecentlyRenewedSession(t *testing.T) {
 	defer stateLock.Unlock()
 	if refreshCalls != 1 {
 		t.Fatalf("expected exactly one refresh attempt, got %d", refreshCalls)
+	}
+}
+
+func TestValidateSessionTicketKeepsActiveSessionWhenRefreshTokenIsInvalid(t *testing.T) {
+	cfg := CreateConfig()
+	cfg.Secret = config.DefaultSecret
+	cfg.Provider.ClientId = "test-client"
+	cfg.Provider.ClientSecret = "test-secret"
+	cfg.Provider.TokenValidation = "Introspection"
+	cfg.Provider.TokenRenewalThreshold = 0.5
+
+	logger := logging.CreateLogger(logging.LevelDebug)
+	refreshCalls := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		switch req.URL.Path {
+		case "/introspect":
+			if err := req.ParseForm(); err != nil {
+				t.Errorf("failed to parse introspection request: %v", err)
+				http.Error(rw, err.Error(), http.StatusBadRequest)
+				return
+			}
+
+			rw.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(rw).Encode(map[string]interface{}{
+				"active": req.Form.Get("token") == "access-1",
+				"sub":    "alice",
+			}); err != nil {
+				t.Errorf("failed to encode introspection response: %v", err)
+			}
+		case "/token":
+			refreshCalls++
+			http.Error(rw, `{"error":"invalid_grant"}`, http.StatusBadRequest)
+		default:
+			t.Errorf("unexpected request path %s", req.URL.Path)
+			http.NotFound(rw, req)
+		}
+	}))
+	defer server.Close()
+
+	toa := &TraefikOidcAuth{
+		logger:         logger,
+		httpClient:     server.Client(),
+		Config:         cfg,
+		SessionStorage: session.CreateCookieSessionStorage(),
+		DiscoveryDocument: &oidc.OidcDiscovery{
+			TokenEndpoint:         server.URL + "/token",
+			IntrospectionEndpoint: server.URL + "/introspect",
+		},
+	}
+
+	staleSession := &session.SessionState{
+		Id:             "session-1",
+		RefreshedAt:    time.Now().Add(-80 * time.Second),
+		AccessToken:    "access-1",
+		IdToken:        "id-1",
+		RefreshToken:   "rotated-refresh-token",
+		TokenExpiresIn: 100,
+	}
+
+	sessionTicket, err := toa.SessionStorage.StoreSession(toa.logger, toa.Config, staleSession.Id, staleSession)
+	if err != nil {
+		t.Fatalf("failed to store session: %v", err)
+	}
+
+	sessionState, claims, updatedSession, err := validateSessionTicket(toa, sessionTicket)
+	if err != nil {
+		t.Fatalf("expected active session to survive invalid refresh token, got error: %v", err)
+	}
+	if sessionState == nil {
+		t.Fatal("expected active session to survive invalid refresh token")
+	}
+	if sessionState.AccessToken != "access-1" {
+		t.Fatalf("expected original access token to be kept, got %s", sessionState.AccessToken)
+	}
+	if claims["sub"] != "alice" {
+		t.Fatalf("expected claims from still-active access token, got %+v", claims)
+	}
+	if updatedSession != nil {
+		t.Fatal("did not expect session cookie to be updated after failed refresh with still-active token")
+	}
+	if refreshCalls != 1 {
+		t.Fatalf("expected exactly one refresh attempt, got %d", refreshCalls)
+	}
+}
+
+func TestInvalidRefreshWithInactiveTokenPreservesSessionCookie(t *testing.T) {
+	cfg := CreateConfig()
+	cfg.Secret = config.DefaultSecret
+	cfg.Provider.ClientId = "test-client"
+	cfg.Provider.ClientSecret = "test-secret"
+	cfg.Provider.TokenValidation = "Introspection"
+	cfg.Provider.TokenRenewalThreshold = 0.5
+
+	logger := logging.CreateLogger(logging.LevelDebug)
+
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		switch req.URL.Path {
+		case "/introspect":
+			rw.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(rw).Encode(map[string]interface{}{"active": false}); err != nil {
+				t.Errorf("failed to encode introspection response: %v", err)
+			}
+		case "/token":
+			http.Error(rw, `{"error":"invalid_grant"}`, http.StatusBadRequest)
+		default:
+			t.Errorf("unexpected request path %s", req.URL.Path)
+			http.NotFound(rw, req)
+		}
+	}))
+	defer server.Close()
+
+	toa := &TraefikOidcAuth{
+		logger:         logger,
+		httpClient:     server.Client(),
+		Config:         cfg,
+		SessionStorage: session.CreateCookieSessionStorage(),
+		DiscoveryDocument: &oidc.OidcDiscovery{
+			TokenEndpoint:         server.URL + "/token",
+			IntrospectionEndpoint: server.URL + "/introspect",
+		},
+	}
+
+	staleSession := &session.SessionState{
+		Id:             "session-1",
+		RefreshedAt:    time.Now().Add(-80 * time.Second),
+		AccessToken:    "expired-access-token",
+		IdToken:        "id-1",
+		RefreshToken:   "rotated-refresh-token",
+		TokenExpiresIn: 100,
+	}
+
+	sessionTicket, err := toa.SessionStorage.StoreSession(toa.logger, toa.Config, staleSession.Id, staleSession)
+	if err != nil {
+		t.Fatalf("failed to store session: %v", err)
+	}
+
+	sessionState, claims, updatedSession, err := validateSessionTicket(toa, sessionTicket)
+	if err == nil {
+		t.Fatal("expected invalid inactive session to require re-authentication")
+	}
+	if sessionState != nil || claims != nil || updatedSession != nil {
+		t.Fatalf("expected no usable session, got session=%+v claims=%+v updated=%+v", sessionState, claims, updatedSession)
+	}
+	if !errors.Is(err, errPreserveSessionCookie) {
+		t.Fatalf("expected preserve-session-cookie error, got %v", err)
+	}
+	if shouldClearSessionCookie(err) {
+		t.Fatal("expected invalid refresh with inactive token to preserve the session cookie")
 	}
 }

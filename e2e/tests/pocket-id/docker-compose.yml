@@ -1,0 +1,43 @@
+services:
+  pocket-id:
+    image: ghcr.io/pocket-id/pocket-id:v2
+    restart: unless-stopped
+    ports:
+      - "1411:1411"
+    environment:
+      APP_URL: http://localhost:1411
+      TRUST_PROXY: "true"
+      ENCRYPTION_KEY: pocket-id-e2e-encryption-key
+      STATIC_API_KEY: pocket-id-e2e-static-api-key
+    volumes:
+      - pocket-id-e2e-data:/app/data
+    healthcheck:
+      test: ["CMD", "/app/pocket-id", "healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  traefik:
+    image: "traefik:v3.5.0"
+    ports:
+      - "9180:80"
+      - "9444:443"
+      - "8180:8080"
+    extra_hosts:
+      - "localhost:172.17.0.1"
+    volumes:
+      - "../../../workspaces/configs/traefik-config.yml:/etc/traefik/traefik.yml:ro"
+      - "../../..:/plugins-local/src/github.com/sevensolutions/traefik-oidc-auth:ro"
+      - "../../.http.yml:/etc/traefik/configs/http.yml:ro"
+    environment:
+      PROVIDER_URL_HTTP: http://localhost:1411
+    depends_on:
+      pocket-id:
+        condition: service_healthy
+
+  whoami:
+    image: "traefik/whoami:latest"
+
+volumes:
+  pocket-id-e2e-data:

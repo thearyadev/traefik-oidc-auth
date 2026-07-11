@@ -4,7 +4,9 @@
   "main": "index.js",
   "scripts": {
     "prepare": "cd tests/keycloak && ./gencerts.sh && docker compose pull",
-    "test": "playwright test"
+    "test": "playwright test",
+    "test:keycloak": "playwright test tests/keycloak",
+    "test:pocket-id": "playwright test tests/pocket-id"
   },
   "keywords": [],
   "author": "",
